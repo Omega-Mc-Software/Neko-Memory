@@ -254,7 +254,7 @@ def verify(answer_text, retrieved_texts):
         results.append({"claim": claim, "verdict": verdict.strip()})
     return results
 
-def answer_verified(question, k=5):
+def answer_verified(question, k=5, history=None):
     """answer() + grounded verify pass + auto-revision of unsupported claims."""
     a, hits, ent = answer(question, k, history)
     evidence = [t for _, t, _ in hits]
