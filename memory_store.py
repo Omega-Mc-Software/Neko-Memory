@@ -26,7 +26,7 @@ v3 adds PASSIVE THINKING (no prompt needed), modeled on real neuroscience:
 Fully local: Ollama glm-4.7-flash (chat) + nomic-embed-text (embeddings).
 SQLite. Nothing leaves the machine.
 """
-import json, sqlite3, subprocess, sys, math, time, uuid, os, re
+import json, sqlite3, subprocess, sys, math, time, uuid, os, re, threading
 
 DB = os.path.expanduser("~/memory/memory.db")
 CHAT_MODEL = "glm-4.7-flash"
