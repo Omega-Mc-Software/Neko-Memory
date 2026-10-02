@@ -256,7 +256,7 @@ def verify(answer_text, retrieved_texts):
 
 def answer_verified(question, k=5):
     """answer() + grounded verify pass + auto-revision of unsupported claims."""
-    a, hits, ent = answer(question, k)
+    a, hits, ent = answer(question, k, history)
     evidence = [t for _, t, _ in hits]
     checks = verify(a, evidence)
     bad = [c for c in checks
@@ -276,7 +276,7 @@ def answer_verified(question, k=5):
     return {"answer": revised, "raw_answer": a, "entity": ent,
             "checks": checks, "revised": bool(bad), "evidence": evidence}
 
-def answer(question, k=5):
+def answer(question, k=5, history=None):
     """v2/v3 answer: entity timeline first (oldest->newest), padded with
     importance-weighted cosine hits, then association-traveling hits."""
     hits = []
@@ -309,10 +309,58 @@ def answer(question, k=5):
         "chapter 1 is still part of the character's history in chapter 20. "
         "Reason across the time gaps and cite which story-time each fact came from.\n"
         "Context:\n" + ctx)
-    out = _ollama("chat", {"model": CHAT_MODEL, "stream": False, "messages": [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": question}]}, timeout=300)
+    msgs = [{"role": "system", "content": sys_prompt}]
+    if history:
+        msgs += history[-6:]
+    msgs.append({"role": "user", "content": question})
+    out = _ollama("chat", {"model": CHAT_MODEL, "stream": False, "messages": msgs}, timeout=300)
     return out["message"]["content"], hits, ent
+
+# ---------------- v4: one command = window + background daemon ----------------
+
+DAEMON_INTERVAL = 900  # seconds between passive consolidation cycles
+
+def _daemon_loop(stop_event):
+    """Background consolidation: replay/DMN cycles on a timer, like sleep
+    doing its work while you stay awake and talk."""
+    while not stop_event.is_set():
+        try:
+            think()
+            print(f"  [daemon] think cycle done", flush=True)
+        except Exception as e:
+            print(f"  [daemon] think error: {e}", flush=True)
+        stop_event.wait(DAEMON_INTERVAL)
+
+def chat(daemon=True):
+    """Run once: starts the background consolidation daemon, then hands you a
+    window to talk to the LLM. Every turn runs the full grounded pipeline;
+    what you say is stored as raw traces the daemon consolidates later."""
+    print(f"Neko memory window — 'exit' to leave, 'think' to force a cycle. Daemon: {'ON' if daemon else 'off'}")
+    stop_event = threading.Event()
+    if daemon:
+        threading.Thread(target=_daemon_loop, args=(stop_event,), daemon=True).start()
+    history = []
+    while True:
+        try:
+            q = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not q:
+            continue
+        if q.lower() in ("exit", "quit"):
+            break
+        if q.lower() == "think":
+            print(json.dumps(think(), indent=2, ensure_ascii=False))
+            continue
+        store(q)  # the conversation itself becomes memory
+        r = answer_verified(q, history=history)
+        history = history + [{"role": "user", "content": q},
+                             {"role": "assistant", "content": r["answer"]}]
+        print(f"[{r['entity'] or 'no entity'}] [revised: {r['revised']}] {r['answer']}")
+    if daemon:
+        stop_event.set()
+    print("window closed; daemon stopped.")
 
 if __name__ == "__main__":
     init()
@@ -335,6 +383,10 @@ if __name__ == "__main__":
         print(a)
         print("--retrieved--")
         for s, t, e in hits: print(f"{s:.3f}  {t}")
+    elif cmd == "chat":
+        chat(daemon=True)  # one command: window + background daemon
+    elif cmd == "daemon":
+        chat(daemon=False)  # headless mode for nohup/systemd
     elif cmd == "askv":
         r = answer_verified(sys.argv[2])
         print(f"[entity: {r['entity']}] [revised: {r['revised']}]")
