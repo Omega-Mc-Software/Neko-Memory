@@ -223,6 +223,59 @@ def think():
     return {"replayed": len(batch), "facts": facts_added,
             "links": links_added, "summary": summary}
 
+# ---------- anti-hallucination (grounded verify) ----------
+def _extract_claims(answer_text):
+    out = _chat([
+        {"role": "system", "content":
+         "Extract every factual claim from the answer as a numbered list, one "
+         "claim per line, each stated standalone. Output ONLY the numbered "
+         "list, nothing else."},
+        {"role": "user", "content": answer_text}])
+    return [l.strip() for l in out.splitlines()
+            if l.strip() and l.strip()[0].isdigit()]
+
+def verify(answer_text, retrieved_texts):
+    """Anti-hallucination pass: extract claims from an answer and check each
+    one against ONLY the retrieved memory context. Inspired by chain-of-"
+    "verification / RARR: generate -> verify each claim against evidence "
+    "-> revise. Returns dict of claim -> (verdict, evidence)."""
+    ctx = "\n".join(f"- {t}" for t in retrieved_texts)
+    results = []
+    for claim in _extract_claims(answer_text):
+        verdict = _chat([
+            {"role": "system", "content":
+             "You verify claims against EVIDENCE. Verdict must be exactly one "
+             "of: SUPPORTED (evidence directly states it), NOT_IN_MEMORY "
+             "(evidence doesn't mention it), CONTRADICTED (evidence says "
+             "otherwise). Format: 'VERDICT: <word> | note: <one short line>'. "
+             "Judge ONLY from the evidence below; never from your own "
+             "knowledge.", },
+            {"role": "user", "content": "Evidence:\n" + ctx + "\n\nClaim: " + claim}])
+        results.append({"claim": claim, "verdict": verdict.strip()})
+    return results
+
+def answer_verified(question, k=5):
+    """answer() + grounded verify pass + auto-revision of unsupported claims."""
+    a, hits, ent = answer(question, k)
+    evidence = [t for _, t, _ in hits]
+    checks = verify(a, evidence)
+    bad = [c for c in checks
+           if not c["verdict"].upper().startswith("SUPPORTED")]
+    revised = a
+    if bad:
+        bad_list = "\n".join(f"- {c['claim']} ({c['verdict'].splitlines()[0]})"
+                             for c in bad)
+        revised = _chat([
+            {"role": "system", "content":
+             "Revise the answer using ONLY the context provided. Remove or "
+             "mark as unknown every claim listed as unsupported. Keep the "
+             "supported content and its citations intact.\nContext:\n" +
+             "\n".join(f"- {t}" for t in evidence) +
+             "\n\nUnsupported claims to remove or mark:\n" + bad_list},
+            {"role": "user", "content": question}])
+    return {"answer": revised, "raw_answer": a, "entity": ent,
+            "checks": checks, "revised": bool(bad), "evidence": evidence}
+
 def answer(question, k=5):
     """v2/v3 answer: entity timeline first (oldest->newest), padded with
     importance-weighted cosine hits, then association-traveling hits."""
@@ -282,6 +335,12 @@ if __name__ == "__main__":
         print(a)
         print("--retrieved--")
         for s, t, e in hits: print(f"{s:.3f}  {t}")
+    elif cmd == "askv":
+        r = answer_verified(sys.argv[2])
+        print(f"[entity: {r['entity']}] [revised: {r['revised']}]")
+        print(r["answer"])
+        print("--checks--")
+        for c in r["checks"]: print(f"{c['verdict']}  {c['claim']}")
     elif cmd == "demo":
         store("Neko Omega built LedgerCat v1.2 for Jason Omega, her father.")
         print("stored; asking back...")
