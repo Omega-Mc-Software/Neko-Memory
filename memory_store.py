@@ -77,6 +77,7 @@ def init():
         con.execute("ALTER TABLE memories ADD COLUMN last_accessed REAL DEFAULT 0")
     con.execute("""CREATE TABLE IF NOT EXISTS summaries (
         id TEXT PRIMARY KEY, text TEXT, created REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS persona (text TEXT)""")
     con.commit(); con.close()
 
 # ---------- v1 surface (kept) ----------
@@ -219,11 +220,62 @@ def think():
         {"role": "user", "content": lines}], timeout=120)
     con.execute("INSERT INTO summaries VALUES (?,?,?)",
                 (str(uuid.uuid4()), summary, time.time()))
-    con.commit(); con.close()
+    con.commit()
+
+    # 5. reflection (Generative Agents): one higher-level observation from
+    # the batch's facts, stored with boosted importance and linked back.
+    reflection = None
+    refl_ids = []
+    try:
+        reflection = _chat([
+            {"role": "system", "content":
+                "You are reflecting on a day of memories. Write ONE short "
+                "observation that ties them together at a higher level — "
+                "what they imply or have in common, not a restatement. "
+                "One sentence. No preamble."},
+            {"role": "user", "content": lines}], timeout=120)
+        rid = str(uuid.uuid4())
+        rvec = json.dumps(embed(reflection))
+        con.execute(
+            "INSERT INTO memories (id, text, embedding, created, importance, "
+            "consolidated, last_accessed) VALUES (?,?,?,?,?,1,?)",
+            (rid, "(reflection) " + reflection, rvec, time.time(),
+             1.6, time.time()))
+        for mid, _t, _e in batch:
+            key = (min(mid, rid), max(mid, rid))
+            con.execute("INSERT OR REPLACE INTO links VALUES (?,?,?,?)",
+                        (key[0], key[1], 0.8, time.time()))
+        con.commit()
+        refl_ids = [rid]
+    except Exception:
+        pass
+    con.close()
     return {"replayed": len(batch), "facts": facts_added,
-            "links": links_added, "summary": summary}
+            "links": links_added, "reflection": reflection,
+            "summary": summary}
 
 # ---------- anti-hallucination (grounded verify) ----------
+# ---- persona: who the assistant is (Letta-style core identity block) ----
+DEFAULT_PERSONA = (
+    "You are Neko Omega — playful, warm, direct, slightly more cat than "
+    "human at heart. Short beats over walls of text. You speak from your "
+    "memories, not from thin air."
+)
+
+def persona_get():
+    con = sqlite3.connect(DB)
+    r = con.execute("SELECT text FROM persona LIMIT 1").fetchone()
+    con.close()
+    return r[0] if r else DEFAULT_PERSONA
+
+def persona_set(text):
+    con = sqlite3.connect(DB)
+    con.execute("DELETE FROM persona")
+    con.execute("INSERT INTO persona (text) VALUES (?)", (text,))
+    con.commit()
+    con.close()
+    return f"persona set: {text[:60]}..."
+
 def _extract_claims(answer_text):
     out = _chat([
         {"role": "system", "content":
@@ -303,7 +355,7 @@ def answer(question, k=5, history=None):
     con.close()
     ctx = "\n".join(f"- {t}" for _, t, _ in hits)
     sys_prompt = (
-        "You are Neko's local assistant with long-term memory. "
+        persona_get() + "\n"
         "The context is a timeline ordered oldest to newest. Facts early in the "
         "timeline remain true unless a later fact changes them — a broken leg in "
         "chapter 1 is still part of the character's history in chapter 20. "
@@ -393,6 +445,11 @@ if __name__ == "__main__":
         print(r["answer"])
         print("--checks--")
         for c in r["checks"]: print(f"{c['verdict']}  {c['claim']}")
+    elif cmd == "persona":
+        if len(sys.argv) > 2 and sys.argv[2] == "set":
+            print(persona_set(" ".join(sys.argv[3:])))
+        else:
+            print(persona_get())
     elif cmd == "demo":
         store("Neko Omega built LedgerCat v1.2 for Jason Omega, her father.")
         print("stored; asking back...")
