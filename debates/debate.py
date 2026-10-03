@@ -33,7 +33,7 @@ COMMON = ("RULES: (1) Do NOT agree just to be agreeable. If the other debaters c
 
 def chat(model, system, messages):
     msgs = [{"role": "system", "content": system}] + messages
-    return memory_store._ollama("chat", {"model": model, "stream": False,
+    return memory_store._ollama("chat", {"model": model, "stream": False, "think": False,
                                          "options": {"temperature": 0.8, "num_predict": 400},
                                          "messages": msgs}, timeout=420)["message"]["content"]
 
